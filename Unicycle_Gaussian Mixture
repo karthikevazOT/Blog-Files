@@ -1,0 +1,304 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.stats import gaussian_kde
+import matplotlib.animation as animation  # <--- added
+
+# =========================
+# Drift and diffusion fields
+# =========================
+def g1_vec(theta):
+    # returns (cos(theta), sin(theta)) used for x,y components
+    return np.cos(theta), np.sin(theta)
+
+# Feedback control u1 as in original
+sigma2 = 0.02
+def u1_vec(x, y, theta):
+    dx = x - 0.5
+    dy = y - 0.5
+    c, s = np.cos(theta), np.sin(theta)
+    return -(dx * c + dy * s) / sigma2
+    
+def u1_vec(x, y, theta):
+    # g1(theta) = direction field
+    c, s = np.cos(theta), np.sin(theta)
+
+    # Gaussian mixture parameters
+    sigma = 0.02
+    inv_var = 1.0 / (sigma2)   # as in your previous version
+
+    # ---- Offsets from the four centers ----
+    dx1 = x - 0.2;  dy1 = y - 0.8
+    dx2 = x - 0.8;  dy2 = y - 0.2
+    dx3 = x - 0.2;  dy3 = y - 0.2
+    dx4 = x - 0.8;  dy4 = y - 0.8
+
+    # ---- Squared Mahalanobis distances ----
+    r1 = (dx1**2 + dy1**2) * inv_var
+    r2 = (dx2**2 + dy2**2) * inv_var
+    r3 = (dx3**2 + dy3**2) * inv_var
+    r4 = (dx4**2 + dy4**2) * inv_var
+
+    # ---- Unnormalized Gaussians ----
+    N1 = np.exp(-0.5 * r1)
+    N2 = np.exp(-0.5 * r2)
+    N3 = np.exp(-0.5 * r3)
+    N4 = np.exp(-0.5 * r4)
+
+    # ---- Denominator of ∇log ρ ----
+    denom = N1 + N2 + N3 + N4 + 1e-12
+
+    # ---- Gradient of log mixture ----
+    grad_x = -inv_var * (N1 * dx1 + N2 * dx2 + N3 * dx3 + N4 * dx4) / denom
+    grad_y = -inv_var * (N1 * dy1 + N2 * dy2 + N3 * dy3 + N4 * dy4) / denom
+
+    # ---- Project gradient onto g1(theta) ----
+    return c * grad_x + s * grad_y
+
+
+# =========================
+# Simulation parameters
+# =========================
+T        = 50.0
+N_ode    = 200000            # time steps on the ODE grid
+dt       = T / (N_ode - 1)
+times    = np.linspace(0.0, T, N_ode)
+
+N_paths  = 1000              # <-- number of independent trajectories to simulate
+rng      = np.random.default_rng(12345)  # reproducibility
+
+# =========================
+# Brownian increments (vectorized)
+# =========================
+# Two independent drivers per path
+dW1 = 0.65*np.sqrt(dt) * rng.standard_normal(size=(N_paths, N_ode - 1))
+dW2 =  0.65*np.sqrt(dt) * rng.standard_normal(size=(N_paths, N_ode - 1))
+
+# =========================
+# State arrays
+# =========================
+# We'll keep only the current state to save memory, plus endpoints
+x  = np.zeros(N_paths)+0.5    # x[0]
+y  = np.zeros(N_paths)+0.5    # x[1]
+th = np.zeros(N_paths)+np.pi    # x[2]
+
+# rng = np.random.default_rng(12345)  # keep the same RNG for reproducibility
+
+# # x, y uniform on [0,1]
+# x  = rng.uniform(0.0, 1.0, size=N_paths)
+# y  = rng.uniform(0.0, 1.0, size=N_paths)
+
+# # θ uniform on [0, 2π)
+# th = rng.uniform(0.0, 2*np.pi, size=N_paths)
+
+# (Optional) sample a few trajectories to visualize paths
+sample_k = 1000
+sample_idx = np.arange(min(sample_k, N_paths))
+traj_sample_x = np.zeros((sample_idx.size, N_ode))
+traj_sample_y = np.zeros((sample_idx.size, N_ode))
+traj_sample_th = np.zeros((sample_idx.size, N_ode))
+traj_sample_x[:, 0] = x[sample_idx]
+traj_sample_y[:, 0] = y[sample_idx]
+traj_sample_th[:, 0] = th[sample_idx]
+
+# =========================
+# Wong–Zakai stepping (vectorized over paths)
+# =========================
+for n in range(N_ode - 1):
+    c, s = g1_vec(th)
+    u1 = u1_vec(x, y, th)
+
+    # Increment from g1*dW1 + g2*dW2 + dt*g1*u1
+    x += c * dW1[:, n] + dt * c * u1
+    y += s * dW1[:, n] + dt * s * u1
+    th += dW2[:, n]
+
+    # domain handling
+    x = np.clip(x, 0.0, 1.0)
+    y = np.clip(y, 0.0, 1.0)
+    th = np.mod(th, 2*np.pi)
+
+    # store sample trajectories
+    if sample_idx.size:
+        traj_sample_x[:, n+1] = x[sample_idx]
+        traj_sample_y[:, n+1] = y[sample_idx]
+        traj_sample_th[:, n+1] = th[sample_idx]
+
+# =========================
+# KDE of endpoints (x_T, y_T)
+# =========================
+endpoints = np.vstack([x, y])                     # shape (2, N_paths)
+kde = gaussian_kde(endpoints, bw_method=0.3)      # adjust bw_method as desired
+
+# grid over [0,1]x[0,1]
+grid_n = 150
+Xg, Yg = np.mgrid[0:1:grid_n*1j, 0:1:grid_n*1j]
+pos = np.vstack([Xg.ravel(), Yg.ravel()])
+Z = kde(pos).reshape(Xg.shape)
+#%%
+# =========================
+# Plots
+# =========================
+
+# (A) a few sample trajectories to get a feel for the flow
+fig, ax = plt.subplots(figsize=(7, 6))
+for i in range(traj_sample_x.shape[0]):
+    ax.plot(traj_sample_x[i], traj_sample_y[i], lw=0.5, alpha=0.7)
+ax.set_xlim(0, 1); ax.set_ylim(0, 1)
+ax.set_xlabel("x[0]"); ax.set_ylabel("x[1]")
+ax.set_title(f"Evolution of Samples")
+ax.grid(True)
+plt.tight_layout()
+
+# (B) Endpoints scatter + KDE contour
+plt.figure(figsize=(8, 7))
+plt.scatter(x, y, s=6, alpha=0.35, label="Endpoints")
+cs = plt.contourf(Xg, Yg, Z, levels=30, cmap="viridis")
+plt.colorbar(cs, label="Endpoint density")
+plt.xlim(0, 1); plt.ylim(0, 1)
+plt.xlabel("x_T = x[0](T)")
+plt.ylabel("y_T = x[1](T)")
+plt.title(f"KDE of Endpoints (N={N_paths})")
+plt.grid(True)
+plt.legend(loc="upper right")
+plt.tight_layout()
+plt.show()
+
+# =========================
+# Animation of sample trajectories
+# =========================
+
+# Use downsampled frames so we don't animate 100k steps
+max_frames = 600  # tweak as you like
+frame_indices = np.linspace(0, N_ode/10 - 1, max_frames, dtype=int)
+
+xs_anim = traj_sample_x[:, frame_indices]   # shape: (sample_k, n_frames)
+ys_anim = traj_sample_y[:, frame_indices]
+times_anim = times[frame_indices]
+n_frames = xs_anim.shape[1]
+
+fig_anim, ax_anim = plt.subplots(figsize=(6, 6))
+
+# initial scatter (time 0)
+scat = ax_anim.scatter(xs_anim[:, 0], ys_anim[:, 0], s=30)
+
+ax_anim.set_xlim(0, 1)
+ax_anim.set_ylim(0, 1)
+ax_anim.set_aspect("equal", adjustable="box")
+ax_anim.set_xlabel("x[0]")
+ax_anim.set_ylabel("x[1]")
+ax_anim.set_title("Evolution of Sample Trajectories")
+
+time_text = ax_anim.text(
+    0.02, 0.95, "",
+    transform=ax_anim.transAxes,
+    ha="left", va="top"
+)
+
+def init():
+    scat.set_offsets(np.c_[xs_anim[:, 0], ys_anim[:, 0]])
+    time_text.set_text(f"t = {times_anim[0]:.1f}")
+    return scat, time_text
+
+def update(frame):
+    x_frame = xs_anim[:, frame]
+    y_frame = ys_anim[:, frame]
+    scat.set_offsets(np.c_[x_frame, y_frame])
+    time_text.set_text(f"t = {times_anim[frame]:.1f}")
+    return scat, time_text
+
+fps = 30
+interval = 1000 / fps  # milliseconds between frames
+
+anim = animation.FuncAnimation(
+    fig_anim,
+    update,
+    init_func=init,
+    frames=n_frames,
+    interval=interval,
+    blit=True
+)
+
+# If you're in a notebook:
+# from IPython.display import HTML
+# HTML(anim.to_jshtml())
+
+# Or to save:
+anim.save("nonholonomic_particles.gif", fps=fps, dpi=150)
+
+plt.show()
+
+#%%
+
+# KDE grid for the animation (coarser than the static plot to speed things up)
+grid_n_anim = 60
+Xg_kde, Yg_kde = np.mgrid[0:1:grid_n_anim*1j, 0:1:grid_n_anim*1j]
+pos_kde = np.vstack([Xg_kde.ravel(), Yg_kde.ravel()])
+
+# Precompute KDE values at each animated time frame
+Z_list = []
+for idx in frame_indices:
+    samples_t = np.vstack([traj_sample_x[:, idx], traj_sample_y[:, idx]])  # shape (2, n_samples)
+    kde_t = gaussian_kde(samples_t, bw_method=0.3)
+    Z_t = kde_t(pos_kde).reshape(Xg_kde.shape)
+    Z_list.append(Z_t)
+
+Z_arr = np.stack(Z_list, axis=0)  # shape: (n_frames, grid_n_anim, grid_n_anim)
+
+# Fix color scale over time
+vmin, vmax = Z_arr.min(), Z_arr.max()
+
+fig_kde, ax_kde = plt.subplots(figsize=(6, 6))
+
+im = ax_kde.imshow(
+    Z_arr[0],
+    origin="lower",
+    extent=[0, 1, 0, 1],
+    vmin=vmin,
+    vmax=vmax,
+    cmap="viridis",
+    aspect="equal"
+)
+cbar = fig_kde.colorbar(im, ax=ax_kde)
+cbar.set_label("Density")
+
+ax_kde.set_xlim(0, 1)
+ax_kde.set_ylim(0, 1)
+ax_kde.set_xlabel("x[0]")
+ax_kde.set_ylabel("x[1]")
+ax_kde.set_title("KDE Evolution Over Time")
+
+time_text_kde = ax_kde.text(
+    0.02, 0.95, "",
+    transform=ax_kde.transAxes,
+    ha="left", va="top", color="w"
+)
+
+def init_kde():
+    im.set_data(Z_arr[0])
+    time_text_kde.set_text(f"t = {times_anim[0]:.2f}")
+    return im, time_text_kde
+
+def update_kde(frame):
+    im.set_data(Z_arr[frame])
+    time_text_kde.set_text(f"t = {times_anim[frame]:.2f}")
+    return im, time_text_kde
+
+anim_kde = animation.FuncAnimation(
+    fig_kde,
+    update_kde,
+    init_func=init_kde,
+    frames=n_frames,
+    interval=interval,
+    blit=True
+)
+
+# To display in a notebook:
+# from IPython.display import HTML
+# HTML(anim_kde.to_jshtml())
+
+# Or to save as GIF / mp4:
+anim_kde.save("kde_evolution.gif", fps=fps, dpi=150)
+
+plt.show()
